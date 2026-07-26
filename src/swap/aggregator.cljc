@@ -57,6 +57,10 @@
   orders of magnitude off. Both of LI.FI's units were wrong here until a live call
   said so, one after the other.
 
+  `:cross-chain?` says whether the vendor can settle across chains at all. It is
+  per-adapter and not per-rail because the two shipped adapters genuinely differ:
+  LI.FI is a bridge aggregator over 72 chains, 0x's Swap API settles on one.
+
   `:fee-recipient-kind` says what the recipient parameter actually IS: an on-chain
   ADDRESS for 0x, but a registered INTEGRATOR ID for LI.FI, whose payout wallet is
   configured out-of-band in their partner portal rather than passed per request.
@@ -70,6 +74,7 @@
     :fee-unit :bps                        ; swapFeeBps: 0–1000, 1000 = 10%
     :slippage-unit :bps                   ; slippageBps
     :fee-recipient-kind :address
+    :cross-chain? false                   ; 0x's Swap API settles on ONE chain
     :params {:chain-id "chainId"
              :sell-token "sellToken"
              :buy-token "buyToken"
@@ -97,6 +102,7 @@
     :fee-unit :fraction                   ; fee: 0 <= x < 1, 0.02 = 2%
     :slippage-unit :fraction              ; slippage: must be <= 1, 0.01 = 1%
     :fee-recipient-kind :integrator-id
+    :cross-chain? true                    ; LI.FI is a BRIDGE aggregator: 72 chains
     :params {:chain-id "fromChain"
              :to-chain-id "toChain"       ; REQUIRED — the live call 400s without it
              :sell-token "fromToken"
@@ -186,12 +192,19 @@
   smallest unit with `erc20/->units`, which is exact string arithmetic: `0.1` at
   18 decimals is `100000000000000000`, not `99999999999999999`."
   [{:keys [from to amount taker slippage-bps fee-bps fee-recipient] :as intent}
-   {:keys [id params fee-params base-url path headers fee-unit slippage-unit]}]
-  (when (core/cross-chain? intent)
-    (throw (ex-info (str "swap: the aggregator rail is same-chain only — "
+   {:keys [id params fee-params base-url path headers fee-unit slippage-unit
+           cross-chain?]}]
+  ;; Cross-chain is refused per-ADAPTER, not per-rail. This used to be a blanket
+  ;; "the aggregator rail is same-chain only", which was wrong about the vendor we
+  ;; actually use: LI.FI is a BRIDGE aggregator spanning 72 chains, so the rail was
+  ;; artificially restricted to a fraction of what it can do. 0x's Swap API really
+  ;; does settle on one chain, so the refusal belongs to the adapter that needs it.
+  (when (and (core/cross-chain? intent) (not cross-chain?))
+    (throw (ex-info (str "swap: adapter " id " settles on a single chain — "
                          (:chain from) " -> " (:chain to)
-                         " needs a cross-chain rail (swap.thorchain)")
-                    {:from (:chain from) :to (:chain to)})))
+                         " needs a cross-chain-capable adapter (:lifi) or the"
+                         " native rail (swap.thorchain)")
+                    {:adapter id :from (:chain from) :to (:chain to)})))
   (let [sell-units (erc20/->units amount (:decimals from))
         q (cond-> {(params :chain-id) (str (:chain-id from))
                    (params :sell-token) (or (:address from) (:asset from))

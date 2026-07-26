@@ -91,7 +91,40 @@ Fees are booked through `kotoba-lang/treasury` — pending on submission,
 confirmed only after the transaction confirms on-chain. A fee booked before
 confirmation is a fee that can be booked and never received.
 
-## Rail 1 — same-chain EVM (`swap.aggregator`)
+## Chains and tokens: `swap.chains`
+
+A registry, and it is a **safety feature rather than a convenience**. The side maps
+`intent` takes carry a token's contract address and its decimals: a wrong address
+sends funds to a different token, wrong decimals mis-scale every amount by a power
+of ten, and both are silent. Hand-typing them per call site is the riskiest thing a
+caller does.
+
+```clojure
+(chains/native :bitcoin)      ;=> {:chain "BTC" :symbol "BTC" :decimals 8 :asset "BTC.BTC"}
+(chains/token :bsc :usdc)     ;=> {:chain "BSC" :chain-id 56 :symbol "USDC" :decimals 18 …}
+(chains/on-rail :thorchain)   ;=> (:avalanche :base :bitcoin :bitcoin-cash :bsc :dogecoin
+                              ;    :ethereum :litecoin)
+(chains/spendable? :bitcoin-cash) ;=> false — swap INTO only, see below
+```
+
+**Every value was verified from two independent sources** (2026-07-26): LI.FI's own
+token API supplied the candidates, then each address was confirmed **on-chain** by
+calling `symbol()`/`decimals()`/`name()` through `erc20`'s calldata against the
+deployed contract. 7/7 matched — and that second step earned its keep immediately:
+
+> **BSC's USDC has 18 decimals, not the 6 it has on every other chain.** Assuming 6
+> would have mis-scaled every BSC amount by 10¹² — a successful-looking transaction
+> for a thousand times the intended value.
+
+THORChain halt state is deliberately **not** in the registry. It changes (BSC, BASE
+and SOL were all halted when this was written) and a stale flag is worse than none —
+read it at runtime via `thorchain.quote/chain-sendable?`.
+
+`:bitcoin-cash` is marked `:spendable? false`: `btc-crypto` can derive a BCH receive
+address but cannot sign for BCH (it needs `SIGHASH_FORKID`), so BCH is swap-into
+only. Stated as data so a caller can branch on it rather than discover it.
+
+## Rail 1 — same-chain EVM… and cross-chain (`swap.aggregator`)
 
 Quoting a swap well means splitting across pools, comparing venues, and
 re-checking every block. An aggregator already does that *and* exposes the fee
@@ -154,6 +187,16 @@ third party is down):
 nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
      | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljs
 ```
+
+**Cross-chain is a per-adapter capability, not a rail-wide ban.** This used to be a
+blanket *"the aggregator rail is same-chain only"*, which was simply wrong about the
+vendor actually in use: **LI.FI is a bridge aggregator spanning 72 chains**, so the
+rail had been restricted to a fraction of what it can do. 0x's Swap API really does
+settle on one chain, so the refusal now belongs to the adapter that needs it
+(`:cross-chain? false`) instead of to everyone.
+
+Verified live: Ethereum USDC → Base USDC, `100` in and `99.737` out, min-out
+extracted and `swap.core/check` passing.
 
 The plan includes an `:erc20-approve` step **only when the response says the
 allowance is actually short** (an unconditional approve costs the user a
