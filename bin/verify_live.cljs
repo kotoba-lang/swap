@@ -62,17 +62,27 @@
 (def btc {:chain "BTC" :asset "BTC.BTC" :symbol "BTC" :decimals 8})
 (def eth-asset {:chain "ETH" :chain-id 1 :asset "ETH.ETH" :symbol "ETH" :decimals 18})
 
+
+;; A REGISTERED THORName. An unregistered one is rejected by the network
+;; ("cannot parse 'kb' as an Address"), which fails the swap and refunds it minus
+;; fees — so this is checked live below rather than assumed.
+(def affiliate-name (or (some-> js/process.env.THOR_AFFILIATE) "t"))
+
 (def tc-intent
   (core/intent {:from btc :to eth-asset :amount "0.05" :destination ETH-DEST
-                :slippage-bps 300 :fee-bps 30 :fee-recipient "kb"}))
+                :slippage-bps 300 :fee-bps 30 :fee-recipient affiliate-name}))
 
 ;; Set this to YOUR node. There is no public default — see
 ;; thorchain.quote/known-endpoints for the measurements behind that.
-(def own-node (or (some-> js/process.env.THORNODE_URL) "https://thornode.example.internal"))
+(def own-node
+  ;; rest.cosmos.directory/thorchain is the one host measured 2026-07-26 that a
+  ;; plain HTTP client can use for the custom /thorchain/* routes; override with
+  ;; THORNODE_URL to point at your own node.
+  (or (some-> js/process.env.THORNODE_URL) "https://rest.cosmos.directory/thorchain"))
 
 (defn part1-thorchain []
   (println "\n═══ 1. THORChain live quote (BTC -> ETH, 30 bps affiliate) ═══")
-  (println "  (set THORNODE_URL to your own node to run this part)")
+  (println (str "  node: " own-node "   affiliate: " affiliate-name))
   (let [req (tc/quote-request tc-intent {:base-url own-node})]
     (println "  GET" (:url req))
     (p/let [{:keys [status body]} (GET (:url req))]
@@ -129,6 +139,17 @@
                (str "router " (get-in m ["ETH" :router])))
         (println (str "           chain-sendable? BTC=" (tcq/chain-sendable? m "BTC")
                       " ETH=" (tcq/chain-sendable? m "ETH")))))))
+
+(defn part2b-thorname []
+  (println "\n═══ 2b. THORName registration (an unregistered affiliate refunds the swap) ═══")
+  (p/let [{reg :body} (GET (tcq/url own-node (tcq/thorname-request affiliate-name)))
+          {unreg :body} (GET (tcq/url own-node (tcq/thorname-request "kb")))]
+    (check (str "\"" affiliate-name "\" is registered (has an owner)")
+           (tcq/registered? reg)
+           (str "owner " (get reg "owner")))
+    (check "an unregistered name is correctly detected despite a 200"
+           (not (tcq/registered? unreg))
+           "the route answers 200 either way — `owner` is the discriminator")))
 
 ;; ══ 3. LI.FI: live aggregator quote (keyless) -> verify the adapter mapping ══
 
@@ -304,12 +325,13 @@
 
 (p/do
   (println "LIVE VERIFICATION — swap plane vs real networks")
-  ;; THORChain's public endpoints (thornode.ninerealms.com, thornode.thorswap.net)
-  ;; are behind Cloudflare bot protection and answer a "Just a moment..."
-  ;; interstitial to a plain HTTP client; ninerealms no longer resolves at all.
-  ;; Working around bot protection is off the table, so the THORChain rail is NOT
-  ;; live-verified here — see the report. Parts 1-2 are left in the file so they
-  ;; run unchanged against an own node.
+  ;; thornode.ninerealms.com no longer resolves and thornode.thorswap.net answers
+  ;; a Cloudflare bot interstitial (which this repo does not work around).
+  ;; rest.cosmos.directory/thorchain does serve the custom /thorchain/* routes, so
+  ;; the THORChain rail IS live-verified below. Override with THORNODE_URL.
+  (guarded "1. THORChain quote" part1-thorchain)
+  (guarded "2. THORChain inbound_addresses" part2-inbound)
+  (guarded "2b. THORName registration" part2b-thorname)
   (guarded "3. LI.FI" part3-lifi)
   (guarded "4. erc20 vs deployed USDC" part4-erc20)
   (guarded "5. Sepolia signature validation" part5-sepolia)
