@@ -1,0 +1,190 @@
+(ns swap.aggregator
+  "Same-chain EVM rail: a DEX aggregator driver.
+
+  WHY AN AGGREGATOR AND NOT A ROUTER: quoting a swap well means splitting it
+  across pools, comparing venues, and re-checking every block. An aggregator
+  already does that, AND it exposes a fee parameter that skims our basis points
+  on-chain to a recipient we name — so there is no fee contract to write, deploy,
+  audit, or custody funds in. This is what MetaMask does; it is not a shortcut.
+
+  VENDOR MAPPING IS DATA, NOT CODE. Aggregator APIs rename fields between
+  versions, so an adapter is a map: which query parameters carry the fee, and
+  where in the response the transaction, the expected output and the minimum
+  output live. Correcting a vendor change is a one-line data edit, and the plan
+  builder below is tested against fixtures rather than against a live vendor.
+
+  HONEST STATUS OF THE SHIPPED ADAPTERS: the field names in `adapters` come from
+  each vendor's published documentation and have NOT been smoke-tested against a
+  live API key in this repo — no key, no live call, no claim that they are right.
+  Each adapter carries `:verified? false` for exactly that reason, and
+  `parse-quote` fails loudly with the adapter's own path when a field is missing,
+  rather than returning a quote with a nil min-out (which `swap.core/check` would
+  then reject as unsafe anyway). Flip `:verified?` when a real key has produced a
+  real quote."
+  (:require [clojure.string :as str]
+            [erc20.core :as erc20]
+            [swap.core :as core]
+            [swap.fee :as fee]))
+
+(def adapters
+  "Declarative vendor adapters. `:fee-params` maps our fee concepts onto the
+  vendor's query parameters; `:paths` maps normalized quote fields onto paths
+  into the vendor's response body (string keys, as JSON decodes)."
+  {:zero-ex-v2
+   {:id :zero-ex-v2
+    :verified? false
+    :base-url "https://api.0x.org"
+    :path "/swap/allowance-holder/quote"
+    :headers {"0x-version" "v2"}          ; API key added by the caller
+    :params {:chain-id "chainId"
+             :sell-token "sellToken"
+             :buy-token "buyToken"
+             :sell-amount "sellAmount"
+             :taker "taker"
+             :slippage-bps "slippageBps"}
+    :fee-params {:recipient "swapFeeRecipient"
+                 :bps "swapFeeBps"
+                 :token "swapFeeToken"}
+    :paths {:tx-to ["transaction" "to"]
+            :tx-data ["transaction" "data"]
+            :tx-value ["transaction" "value"]
+            :tx-gas ["transaction" "gas"]
+            :expected-out ["buyAmount"]
+            :min-out ["minBuyAmount"]
+            :allowance-spender ["issues" "allowance" "spender"]
+            :allowance-current ["issues" "allowance" "actual"]}}
+
+   :lifi
+   {:id :lifi
+    :verified? false
+    :base-url "https://li.quest"
+    :path "/v1/quote"
+    :headers {}
+    :params {:chain-id "fromChain"
+             :sell-token "fromToken"
+             :buy-token "toToken"
+             :sell-amount "fromAmount"
+             :taker "fromAddress"
+             :slippage-bps "slippage"}
+    :fee-params {:recipient "integrator" :bps "fee"}
+    :paths {:tx-to ["transactionRequest" "to"]
+            :tx-data ["transactionRequest" "data"]
+            :tx-value ["transactionRequest" "value"]
+            :tx-gas ["transactionRequest" "gasLimit"]
+            :expected-out ["estimate" "toAmount"]
+            :min-out ["estimate" "toAmountMin"]}}})
+
+(defn- fee-token
+  "Which token the fee is skimmed in. Taking it in the BUY token is the norm (the
+  user's sell balance is already committed) and keeps the fee denominated in what
+  the user receives."
+  [intent]
+  (get-in intent [:to :address]))
+
+(defn quote-request
+  "Build an aggregator quote request as data: `{:method :get :url … :headers …}`.
+  No HTTP here — the caller owns the transport.
+
+  `:amount` is converted from the human decimal string to the sell token's
+  smallest unit with `erc20/->units`, which is exact string arithmetic: `0.1` at
+  18 decimals is `100000000000000000`, not `99999999999999999`."
+  [{:keys [from to amount taker slippage-bps fee-bps fee-recipient] :as intent}
+   {:keys [id params fee-params base-url path headers]}]
+  (when (core/cross-chain? intent)
+    (throw (ex-info (str "swap: the aggregator rail is same-chain only — "
+                         (:chain from) " -> " (:chain to)
+                         " needs a cross-chain rail (swap.thorchain)")
+                    {:from (:chain from) :to (:chain to)})))
+  (let [sell-units (erc20/->units amount (:decimals from))
+        q (cond-> {(params :chain-id) (str (:chain-id from))
+                   (params :sell-token) (or (:address from) (:asset from))
+                   (params :buy-token) (or (:address to) (:asset to))
+                   (params :sell-amount) sell-units
+                   (params :slippage-bps) (str slippage-bps)}
+            taker (assoc (params :taker) taker)
+            (and fee-bps (pos? fee-bps))
+            (cond-> (:recipient fee-params) (assoc (:recipient fee-params) fee-recipient)
+                    (:bps fee-params) (assoc (:bps fee-params) (str fee-bps))
+                    (:token fee-params) (assoc (:token fee-params) (fee-token intent))))]
+    {:method :get
+     :provider id
+     :url (str base-url path "?"
+               (str/join "&" (for [[k v] (sort q) :when (some? v)]
+                               (str k "=" #?(:clj (java.net.URLEncoder/encode (str v) "UTF-8")
+                                             :cljs (js/encodeURIComponent (str v)))))))
+     :headers headers
+     :sell-units sell-units}))
+
+(defn- at [body path]
+  (reduce (fn [m k] (when (map? m) (or (get m k) (get m (keyword k))))) body path))
+
+(defn- require-at [body path field id]
+  (or (at body path)
+      (throw (ex-info (str "swap/" (name id) ": response is missing " field
+                           " at " (pr-str path)
+                           " — the adapter's field mapping does not match this vendor's"
+                           " current response shape. Fix swap.aggregator/adapters;"
+                           " do not proceed with a partial quote.")
+                      {:provider id :field field :path path :body body}))))
+
+(defn parse-quote
+  "Vendor response -> a normalized `swap.core` quote with an execution plan.
+
+  Builds an `:erc20-approve` step ONLY when the response says an allowance is
+  actually missing. An unconditional approve costs the user a transaction they
+  may not need; skipping a needed one makes the swap revert."
+  [{:keys [fee-bps fee-recipient] :as intent}
+   {:keys [id paths] :as adapter}
+   body
+   {:keys [sell-units]}]
+  (let [tx-to (require-at body (:tx-to paths) "transaction target" id)
+        tx-data (require-at body (:tx-data paths) "transaction calldata" id)
+        tx-value (or (at body (:tx-value paths)) "0")
+        expected-out (str (require-at body (:expected-out paths) "expected output" id))
+        min-out (str (require-at body (:min-out paths) "minimum output" id))
+        spender (at body (:allowance-spender paths))
+        current (at body (:allowance-current paths))
+        ;; Approve ONLY when the vendor says the allowance is actually short. An
+        ;; unconditional approve costs the user a transaction they may not need;
+        ;; skipping a needed one makes the swap revert. When the vendor reports a
+        ;; spender but no current allowance, assume the worst (approve).
+        needs-approve? (and spender
+                            (or (nil? current)
+                                (not (re-matches #"\d+" (str/trim (str current))))
+                                (core/amount< (str current) sell-units)))
+        approve-step
+        (when needs-approve?
+          {:step/kind :erc20-approve
+           :step/why (str "the router (" spender ") needs an allowance for "
+                          (erc20/->display sell-units (get-in intent [:from :decimals]))
+                          " " (get-in intent [:from :symbol] "tokens"))
+           :chain (get-in intent [:from :chain])
+           :chain-id (get-in intent [:from :chain-id])
+           :to (get-in intent [:from :address])
+           :data (erc20/approve spender sell-units)
+           :value "0"})
+        swap-step
+        {:step/kind :evm-call
+         :step/why (str "swap " (erc20/->display sell-units (get-in intent [:from :decimals]))
+                        " " (get-in intent [:from :symbol] "")
+                        " for at least " (erc20/->display min-out (get-in intent [:to :decimals]))
+                        " " (get-in intent [:to :symbol] "")
+                        (when (pos? (or fee-bps 0))
+                          (str ", including a " (/ (double fee-bps) 100.0)
+                               "% fee to " fee-recipient)))
+         :chain (get-in intent [:to :chain])
+         :chain-id (get-in intent [:from :chain-id])
+         :to tx-to
+         :data tx-data
+         :value (str tx-value)
+         :gas (some-> (at body (:tx-gas paths)) str)}]
+    {:rail :aggregator
+     :provider id
+     :verified-adapter? (boolean (:verified? adapter))
+     :expected-out expected-out
+     :min-out min-out
+     :fee-bps (or fee-bps 0)
+     :fee-mechanism (:mechanism (fee/quote-fee intent :protocol-affiliate))
+     :expires-at nil                      ; these APIs are quote-per-request
+     :steps (vec (keep identity [approve-step swap-step]))
+     :raw body}))
