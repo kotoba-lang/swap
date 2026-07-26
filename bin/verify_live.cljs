@@ -66,9 +66,14 @@
   (core/intent {:from btc :to eth-asset :amount "0.05" :destination ETH-DEST
                 :slippage-bps 300 :fee-bps 30 :fee-recipient "kb"}))
 
+;; Set this to YOUR node. There is no public default — see
+;; thorchain.quote/known-endpoints for the measurements behind that.
+(def own-node (or (some-> js/process.env.THORNODE_URL) "https://thornode.example.internal"))
+
 (defn part1-thorchain []
   (println "\n═══ 1. THORChain live quote (BTC -> ETH, 30 bps affiliate) ═══")
-  (let [req (tc/quote-request tc-intent {})]
+  (println "  (set THORNODE_URL to your own node to run this part)")
+  (let [req (tc/quote-request tc-intent {:base-url own-node})]
     (println "  GET" (:url req))
     (p/let [{:keys [status body]} (GET (:url req))]
       (check "quote endpoint answered 200" (= 200 status) (str "status " status))
@@ -110,8 +115,7 @@
 
 (defn part2-inbound []
   (println "\n═══ 2. THORChain live inbound_addresses ═══")
-  (p/let [{:keys [status body]} (GET (tcq/url tcq/mainnet-base-url
-                                              (tcq/inbound-addresses-request)))]
+  (p/let [{:keys [status body]} (GET (tcq/url own-node (tcq/inbound-addresses-request)))]
     (check "inbound_addresses answered 200" (= 200 status))
     (when (= 200 status)
       (let [m (tcq/parse-inbound-addresses body)]
