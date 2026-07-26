@@ -32,8 +32,13 @@
 
 (defn quote-request
   "Build a THORNode `/thorchain/quote/swap` request for this intent.
-  `base-url` is the caller's node (see `thorchain.quote/mainnet-base-url` — and
-  its warning about public endpoints)."
+
+  `base-url` is REQUIRED — the caller's own node. There is no default, because as
+  of 2026-07-26 there is no public THORNode host a programmatic client can
+  actually use: ninerealms no longer resolves and thorswap answers a Cloudflare
+  bot interstitial (`thorchain.quote/known-endpoints` records the measurements).
+  A default pointing at a dead host would fail at the moment someone is moving
+  funds and look like a bug here."
   [{:keys [from to amount destination taker slippage-bps fee-bps fee-recipient]}
    {:keys [base-url affiliate streaming-interval streaming-quantity]}]
   (let [amount-1e8 (erc20/->units amount thorchain-decimals)
@@ -49,8 +54,7 @@
               streaming-quantity (assoc :streaming-quantity streaming-quantity))]
     {:method :get
      :provider :thorchain
-     :url (tc-quote/url (or base-url tc-quote/mainnet-base-url)
-                        (tc-quote/swap-quote-request req))
+     :url (tc-quote/url base-url (tc-quote/swap-quote-request req))
      :headers {}
      :verify-with req
      :amount-1e8 amount-1e8}))

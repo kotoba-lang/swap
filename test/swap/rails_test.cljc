@@ -114,18 +114,28 @@
 
 ;; ══ thorchain rail ══
 
+;; base-url is required now — there is no usable public THORNode default
+;; (thorchain.quote/known-endpoints records why), so tests name a node too.
+(def own-node "https://thornode.example.internal")
+
 (def tc-intent
   (core/intent {:from btc :to eth :amount "0.05"
                 :destination "0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0"
                 :slippage-bps 300 :fee-bps 30 :fee-recipient "kb"}))
 
 (deftest thorchain-request-uses-1e8-and-affiliate
-  (let [{:keys [url amount-1e8]} (tc/quote-request tc-intent {:affiliate "kb"})]
+  (let [{:keys [url amount-1e8]} (tc/quote-request tc-intent {:base-url own-node :affiliate "kb"})]
     (is (= "5000000" amount-1e8) "0.05 in 1e8 fixed point")
     (is (str/includes? url "amount=5000000"))
     (is (str/includes? url "affiliate=kb"))
     (is (str/includes? url "affiliate_bps=30"))
-    (is (str/includes? url "tolerance_bps=300"))))
+    (is (str/includes? url "tolerance_bps=300"))
+    (is (str/starts-with? url own-node) "the caller's node, not a baked-in default")))
+
+(deftest thorchain-quote-request-requires-a-node
+  (testing "no base-url must fail here, not at fund-moving time"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (tc/quote-request tc-intent {})))))
 
 (defn tc-body [memo]
   {"inbound_address" "bc1qvault"
@@ -141,7 +151,7 @@
   "=:ETH.ETH:0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0:200000000000/1/0:kb:30")
 
 (deftest thorchain-plan-is-one-native-transfer
-  (let [req (tc/quote-request tc-intent {})
+  (let [req (tc/quote-request tc-intent {:base-url own-node})
         q (tc/parse-quote tc-intent req (tc-body good-memo))
         [step] (:steps q)]
     (is (= :thorchain (:rail q)))
@@ -155,7 +165,7 @@
         "the fee is stated in the confirmation reason")))
 
 (deftest thorchain-min-out-comes-from-the-memo-limit
-  (let [req (tc/quote-request tc-intent {})
+  (let [req (tc/quote-request tc-intent {:base-url own-node})
         q (tc/parse-quote tc-intent req (tc-body good-memo))]
     (is (= "200000000000" (:min-out q)) "the memo's LIM field is the on-chain guard")
     (is (:ok? (core/check tc-intent q 1000)))))
@@ -163,7 +173,7 @@
 (deftest thorchain-missing-limit-is-reported-not-papered-over
   (testing "a memo with no limit means NO on-chain guard — must not default to expected-out"
     (let [memo "=:ETH.ETH:0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0::kb:30"
-          req (tc/quote-request tc-intent {})
+          req (tc/quote-request tc-intent {:base-url own-node})
           q (tc/parse-quote tc-intent req (tc-body memo))
           {:keys [ok? problems]} (core/check tc-intent q 1000)]
       (is (nil? (:min-out q)))
@@ -172,19 +182,19 @@
 
 (deftest thorchain-refuses-substituted-destination
   (let [attack "=:ETH.ETH:0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef:200000000000/1/0:kb:30"
-        req (tc/quote-request tc-intent {})]
+        req (tc/quote-request tc-intent {:base-url own-node})]
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (tc/parse-quote tc-intent req (tc-body attack)))
         "a quote endpoint must not be able to redirect the output")))
 
 (deftest thorchain-refuses-dropped-affiliate-fee
   (let [memo "=:ETH.ETH:0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0:200000000000/1/0"
-        req (tc/quote-request tc-intent {})]
+        req (tc/quote-request tc-intent {:base-url own-node})]
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (tc/parse-quote tc-intent req (tc-body memo))))))
 
 (deftest thorchain-refuses-missing-inbound-address
-  (let [req (tc/quote-request tc-intent {})]
+  (let [req (tc/quote-request tc-intent {:base-url own-node})]
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (tc/parse-quote tc-intent req
                                  (dissoc (tc-body good-memo) "inbound_address"))))))
@@ -193,7 +203,7 @@
   (let [i (core/intent {:from eth :to btc :amount "1"
                         :destination "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
                         :slippage-bps 300})
-        req (tc/quote-request i {})
+        req (tc/quote-request i {:base-url own-node})
         memo "=:BTC.BTC:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh:100000/1/0"
         q (tc/parse-quote i req (assoc (tc-body memo) "router" "0xdef1c0ded9bec7f1a1670819833240f027b25eff"))
         [step] (:steps q)]
@@ -204,7 +214,7 @@
     (is (= "1000000000000000000" (:amount step)) "wei, not 1e8")))
 
 (deftest thorchain-preflight-flags-halted-chain-and-small-amounts
-  (let [req (tc/quote-request tc-intent {})
+  (let [req (tc/quote-request tc-intent {:base-url own-node})
         q (tc/parse-quote tc-intent req (tc-body good-memo))
         halted {"BTC" {:address "bc1qvault" :halted true}}
         fine {"BTC" {:address "bc1qvault" :halted false}}]
@@ -215,7 +225,7 @@
                                       :destination "0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0"
                                       :slippage-bps 300})
             tiny-memo "=:ETH.ETH:0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0:1/1/0"
-            tq (tc/parse-quote tiny-intent (tc/quote-request tiny-intent {})
+            tq (tc/parse-quote tiny-intent (tc/quote-request tiny-intent {:base-url own-node})
                                (tc-body tiny-memo))]
         (is (some #(= :below-recommended-minimum (:problem %))
                   (tc/preflight tiny-intent tq fine)))))))
