@@ -109,9 +109,27 @@ ID** whose payout wallet is configured out-of-band.
 
 ### Adapter status, and what a live call bought
 
+**Current position: LI.FI only** (owner decision 2026-07-26). 0x is deferred, not
+abandoned — its mapping stays, ready for one live call once a key exists.
+
+That decision is **enforced, not remembered**: `agg/adapter` defaults to `:lifi`
+and *refuses* an unverified adapter unless you opt in with
+`{:allow-unverified? true}`.
+
+```clojure
+(agg/adapter)                                     ;=> the :lifi adapter
+(agg/adapter :zero-ex-v2)                         ;=> throws — never live-verified
+(agg/adapter :zero-ex-v2 {:allow-unverified? true}) ;=> allowed, deliberately
+```
+
+After a live call found four defects in a mapping written carefully from the
+vendor's own docs, an unverified mapping is not a smaller risk than an untested
+one — it is the same risk wearing documentation. So the flag is a gate rather than
+a note somebody is supposed to have read.
+
 | adapter | status |
 |---|---|
-| `:lifi` | **live-verified** 2026-07-26 against `li.quest`, keyless |
+| `:lifi` | **live-verified** 2026-07-26 against `li.quest`, keyless — and the default |
 | `:zero-ex-v2` | **docs-verified only.** Parameter names, `swapFeeBps`'s bps unit (0–1000), `issues.allowance` semantics and the `0x-version: v2` header are confirmed against 0x's current docs, but 0x needs an API key and this repo has none — so no live call has exercised the **response** field paths. `:verified? false` until one does. |
 
 The first live LI.FI call **failed**, and found four real defects that fixtures
