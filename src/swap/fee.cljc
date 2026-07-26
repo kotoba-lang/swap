@@ -62,6 +62,36 @@
    :recipient fee-recipient
    :preferred? (= mechanism preferred-mechanism)})
 
+;; ── is the fee recipient actually THERE? ──────────────────────────────────
+
+(defn recipient-code-request
+  "An `eth_getCode` request for the fee recipient, as data (no I/O in this library).
+  Hand the result to `verify-recipient`.
+
+  WHY THIS EXISTS: a Safe or any other contract recipient is deployed PER CHAIN. An
+  address being unoccupied on another chain does not mean the Safe is there, and a
+  fee paid to an address with no code on that chain cannot be moved by anyone. This
+  is not hypothetical — a real Safe measured on 2026-07-26 existed on Ethereum and
+  had NO code on BSC, Avalanche, Base, Polygon, Arbitrum or Optimism, while
+  `treasury` was at the time advising exactly that switch to a cheaper L2 without
+  changing the recipient."
+  [{:keys [fee-recipient]}]
+  (treasury/code-request fee-recipient))
+
+(defn verify-recipient
+  "Check that the fee recipient exists on the chain the fee will be paid on.
+  `code-result` is what `eth_getCode` returned for `recipient-code-request`.
+
+  Only meaningful when the recipient is a CONTRACT — an EOA legitimately has no
+  code, which is why `intent` carries `:fee-recipient-contract?` rather than this
+  function guessing."
+  [{:keys [fee-recipient fee-recipient-contract?] :as intent} code-result]
+  (treasury/verify-recipient-deployed
+   {:address fee-recipient
+    :chain (or (get-in intent [:to :chain]) (get-in intent [:from :chain]))
+    :expect-contract? (boolean fee-recipient-contract?)}
+   code-result))
+
 (defn pending-entry
   "A ledger entry for a fee whose swap has been submitted but NOT confirmed.
   `usd` is the notional the fee was computed on (the caller owns pricing — this

@@ -31,6 +31,7 @@
             [swap.aggregator :as agg]
             [swap.chains :as chains]
             [swap.core :as core]
+            [swap.fee :as fee]
             [swap.thorchain :as tc]
             [thorchain.quote :as tcq]))
 
@@ -354,6 +355,51 @@
               (check "swap.core/check passes the live cross-chain quote" ok?
                      (pr-str problems)))))))))
 
+;; ══ 6. a contract fee recipient must exist ON THE CHAIN the fee lands on ══
+;; Run against a real Safe, on a chain where it IS deployed and one where it is not.
+;; This is the check that turns "same address on a cheaper L2" from advice into a
+;; refusal.
+
+(def SAFE "0x640404B566D34c401996eBb360F40BC4cECFA881")
+
+(defn part6-fee-recipient []
+  (println "\n═══ 6. fee recipient deployment, on a REAL Safe ═══")
+  (let [eth-side (chains/token :ethereum :usdc)
+        base-side (chains/token :base :usdc)
+        on-eth (core/intent {:from eth-side :to (chains/native :ethereum) :amount "100"
+                             :taker TAKER :fee-bps 30 :fee-recipient SAFE
+                             :fee-recipient-contract? true})
+        on-base (core/intent {:from base-side :to (chains/native :base) :amount "100"
+                              :taker TAKER :fee-bps 30 :fee-recipient SAFE
+                              :fee-recipient-contract? true})
+        q {:rail :aggregator :provider :test :expected-out "1000" :min-out "1000"
+           :fee-bps 30 :fee-mechanism :protocol-affiliate
+           :steps [{:step/kind :evm-call :step/why "x" :to "0xr" :data "0x"}]}]
+    ;; POST-json returns {:status :body}; the RPC result is inside :body. Getting
+    ;; this wrong made BOTH chains read as nil, and the Base assertion PASSED by
+    ;; accident — which is why this part asserts the positive case too.
+    (p/let [eth-resp (POST-json "https://ethereum-rpc.publicnode.com"
+                                (fee/recipient-code-request on-eth))
+            base-resp (POST-json "https://base-rpc.publicnode.com"
+                                 (fee/recipient-code-request on-base))
+            eth-code (get-in eth-resp [:body "result"])
+            base-code (get-in base-resp [:body "result"])]
+      (check "the Safe HAS code on Ethereum" (core/contract-code? eth-code)
+             (str (quot (- (count (str eth-code)) 2) 2) " bytes"))
+      (check "the Safe has NO code on Base" (not (core/contract-code? base-code))
+             (str "eth_getCode -> " (pr-str base-code)))
+      (check "check PASSES for the fee on Ethereum"
+             (:ok? (core/check on-eth q nil {:fee-recipient-code eth-code})))
+      (let [{:keys [ok? problems]} (core/check on-base q nil {:fee-recipient-code base-code})]
+        (check "check REFUSES the same fee on Base — funds would be unrecoverable"
+               (and (not ok?)
+                    (some #(= :fee-recipient-has-no-code (:problem %)) problems))
+               (str/join "; " (map (comp name :problem) problems))))
+      (let [{:keys [ok? problems]} (core/check on-eth q nil)]
+        (check "and declaring a contract WITHOUT looking is refused too"
+               (and (not ok?)
+                    (some #(= :fee-recipient-unverified (:problem %)) problems)))))))
+
 (p/do
   (println "LIVE VERIFICATION — swap plane vs real networks")
   ;; thornode.ninerealms.com no longer resolves and thornode.thorswap.net answers
@@ -367,5 +413,6 @@
   (guarded "3b. LI.FI cross-chain" part3b-lifi-crosschain)
   (guarded "4. erc20 vs deployed USDC" part4-erc20)
   (guarded "5. Sepolia signature validation" part5-sepolia)
+  (guarded "6. fee recipient deployment" part6-fee-recipient)
   (println (str "\n═══ TOTAL: " @ok " passed, " @fail " failed ═══"))
   (when (pos? @fail) (js/process.exit 1)))

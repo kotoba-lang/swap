@@ -91,6 +91,46 @@ Fees are booked through `kotoba-lang/treasury` — pending on submission,
 confirmed only after the transaction confirms on-chain. A fee booked before
 confirmation is a fee that can be booked and never received.
 
+### The fee recipient has to exist on the chain the fee lands on
+
+**A Safe is a contract, deployed per chain.** An address being unoccupied on another
+chain does not mean your Safe is there, and a fee paid to an address with no code on
+that chain cannot be moved by anyone, ever.
+
+This is measured, not theoretical. A real Safe: deployed on Ethereum mainnet
+(v1.4.1), and `eth_getCode` returns `0x` on **BSC, Avalanche, Base, Polygon,
+Arbitrum and Optimism**. `treasury` was at the time advising exactly the switch that
+would have burned it — *"a Safe's address is the same across chains, so switching
+chain moves the rail to a cheaper L2 without changing the recipient."*
+
+So declare it and `check` enforces it:
+
+```clojure
+(def i (core/intent {… :fee-bps 30 :fee-recipient safe
+                     :fee-recipient-contract? true}))   ; ← declare, don't guess
+
+(fee/recipient-code-request i)      ;=> an eth_getCode request, as data
+(core/check i quote now {:fee-recipient-code code})
+;; on Ethereum -> {:ok? true}
+;; on Base     -> {:ok? false :problems [{:problem :fee-recipient-has-no-code …}]}
+;; no code supplied at all -> {:problem :fee-recipient-unverified …}
+```
+
+Three deliberate details:
+
+- **`:fee-recipient-contract?` is declared, never inferred.** An EOA legitimately has
+  no code, so "no code here" is ambiguous between *fine* and *funds lost* unless the
+  caller says which kind of recipient it is.
+- **Declared-but-unchecked is its own problem.** A caller must not be able to forget
+  to look; silence is not a pass.
+- **Not declaring anything keeps the previous behaviour**, so existing callers are
+  unaffected.
+
+Verified live (`bin/verify_live.cljs` part 6) against that same Safe on both a chain
+where it exists and one where it does not — including the positive case, because the
+first version of that check read `nil` on both chains and the negative assertion
+passed *by accident*.
+
 ## Chains and tokens: `swap.chains`
 
 A registry, and it is a **safety feature rather than a convenience**. The side maps
