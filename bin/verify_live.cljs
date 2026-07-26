@@ -1,0 +1,313 @@
+;; LIVE verification of the swap plane against REAL networks and a REAL chain.
+;; Keyless throughout: public LI.FI, public Ethereum mainnet RPC, public Sepolia
+;; RPC. Read-only except for one deliberately-unfunded Sepolia broadcast (part 5).
+;;
+;; NOT part of CI, on purpose: CI must not go red because a third party is down.
+;; This is the check you run when you change an adapter, and the one that earns an
+;; adapter its `:verified? true`.
+;;
+;;   nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+;;        | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljs
+;;
+;; Everything here runs the ACTUAL library code — the point is not "can we curl an
+;; API" but "does erc20/org-thorchain/swap agree with a real chain and a real node".
+;;
+;; WHAT THIS FOUND on its first run (2026-07-26), none of which fixture tests
+;; could have caught, because a fixture encodes what the author believed:
+;;   1. LI.FI requires `toChain`; the adapter never sent it            -> 400
+;;   2. LI.FI's `fee` is a decimal FRACTION, not basis points          -> 400
+;;   3. LI.FI's `slippage` is a fraction too                           -> 400
+;;   4. `at` with a nil field path returned the WHOLE response body, so an
+;;      adapter with no allowance paths (LI.FI) built a bogus approve step and
+;;      threw on a map where an address belonged
+;; That is the argument for live-verifying a vendor mapping before trusting it
+;; with money.
+(ns verify-live
+  (:require [clojure.string :as str]
+            [erc20.core :as erc20]
+            [erc20.permit :as permit]
+            [eth-crypto.core :as eth]
+            [promesa.core :as p]
+            [swap.aggregator :as agg]
+            [swap.core :as core]
+            [swap.thorchain :as tc]
+            [thorchain.quote :as tcq]))
+
+(defn GET [url]
+  (p/let [r (js/fetch url #js {:headers #js {"accept" "application/json"}})
+          body (.text r)]
+    {:status (.-status r)
+     :body (try (js->clj (js/JSON.parse body)) (catch :default _ body))}))
+
+(defn POST-json [url payload]
+  (p/let [r (js/fetch url #js {:method "POST"
+                               :headers #js {"content-type" "application/json"}
+                               :body (js/JSON.stringify (clj->js payload))})
+          body (.text r)]
+    {:status (.-status r)
+     :body (try (js->clj (js/JSON.parse body)) (catch :default _ body))}))
+
+(def ok (atom 0))
+(def fail (atom 0))
+
+(defn check [label pass? & [detail]]
+  (if pass? (swap! ok inc) (swap! fail inc))
+  (println (str (if pass? "  PASS  " "  FAIL  ") label
+                (when detail (str "\n           " detail)))))
+
+;; ══ 1. THORChain: live quote for a real BTC -> ETH swap with our affiliate fee ══
+
+(def ETH-DEST "0xe6a30f4f3bad978910e2cbb4d97581f5b5a0ade0")
+
+(def btc {:chain "BTC" :asset "BTC.BTC" :symbol "BTC" :decimals 8})
+(def eth-asset {:chain "ETH" :chain-id 1 :asset "ETH.ETH" :symbol "ETH" :decimals 18})
+
+(def tc-intent
+  (core/intent {:from btc :to eth-asset :amount "0.05" :destination ETH-DEST
+                :slippage-bps 300 :fee-bps 30 :fee-recipient "kb"}))
+
+(defn part1-thorchain []
+  (println "\n═══ 1. THORChain live quote (BTC -> ETH, 30 bps affiliate) ═══")
+  (let [req (tc/quote-request tc-intent {})]
+    (println "  GET" (:url req))
+    (p/let [{:keys [status body]} (GET (:url req))]
+      (check "quote endpoint answered 200" (= 200 status) (str "status " status))
+      (if (not= 200 status)
+        (println "           body:" (pr-str body))
+        (let [q (tcq/parse-swap-quote body)]
+          (check "parse-swap-quote extracted an inbound vault address"
+                 (string? (:inbound-address q)) (str "inbound " (:inbound-address q)))
+          (check "…and a memo" (string? (:memo q)) (str "memo " (:memo q)))
+          (check "…and an expected output" (some? (:expected-amount-out q))
+                 (str "expected_amount_out " (:expected-amount-out q) " (1e8)"))
+          ;; THE load-bearing check: does the memo the node returned actually
+          ;; encode OUR destination and OUR affiliate bps?
+          (let [verdict (tcq/verify-memo (:verify-with req) (:memo q))]
+            (check "verify-memo accepts the LIVE memo (destination + affiliate + bps)"
+                   (:ok? verdict) (pr-str (:problems verdict))))
+          ;; and the full driver, which refuses to build a step on a mismatch
+          (let [parsed (try (tc/parse-quote tc-intent req body)
+                            (catch :default e {:error (ex-message e)}))]
+            (check "swap.thorchain/parse-quote built a plan from the live quote"
+                   (and (not (:error parsed)) (= 1 (count (:steps parsed))))
+                   (or (:error parsed)
+                       (str "step " (pr-str (select-keys (first (:steps parsed))
+                                                         [:step/kind :chain :to :amount])))))
+            (when-not (:error parsed)
+              (check "the live memo carries an on-chain min-out (LIM field)"
+                     (some? (:min-out parsed))
+                     (str "min-out " (:min-out parsed) " vs expected " (:expected-out parsed)))
+              (let [{:keys [ok? problems]} (core/check tc-intent parsed
+                                                       (js/Math.floor (/ (.getTime (js/Date.)) 1000)))]
+                (check "swap.core/check passes the live quote" ok? (pr-str problems)))))
+          ;; a mutated memo must be rejected — proves the check is load-bearing
+          (let [attack (str/replace (:memo q) ETH-DEST
+                                    "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]
+            (check "a destination-substituted LIVE memo is REJECTED"
+                   (not (:ok? (tcq/verify-memo (:verify-with req) attack))))))))))
+
+;; ══ 2. THORChain: live inbound addresses / halt state ══
+
+(defn part2-inbound []
+  (println "\n═══ 2. THORChain live inbound_addresses ═══")
+  (p/let [{:keys [status body]} (GET (tcq/url tcq/mainnet-base-url
+                                              (tcq/inbound-addresses-request)))]
+    (check "inbound_addresses answered 200" (= 200 status))
+    (when (= 200 status)
+      (let [m (tcq/parse-inbound-addresses body)]
+        (check "parsed a per-chain map" (< 3 (count m)) (str (count m) " chains: "
+                                                            (str/join "," (sort (keys m)))))
+        (check "BTC vault address present" (string? (get-in m ["BTC" :address]))
+               (str "BTC " (get-in m ["BTC" :address])
+                    " halted=" (get-in m ["BTC" :halted])))
+        (check "ETH router present (EVM inbound goes through it)"
+               (string? (get-in m ["ETH" :router]))
+               (str "router " (get-in m ["ETH" :router])))
+        (println (str "           chain-sendable? BTC=" (tcq/chain-sendable? m "BTC")
+                      " ETH=" (tcq/chain-sendable? m "ETH")))))))
+
+;; ══ 3. LI.FI: live aggregator quote (keyless) -> verify the adapter mapping ══
+
+(def usdc {:chain "ETH" :chain-id 1 :asset "ETH.USDC" :symbol "USDC" :decimals 6
+           :address "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"})
+(def weth {:chain "ETH" :chain-id 1 :asset "ETH.WETH" :symbol "WETH" :decimals 18
+           :address "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"})
+
+;; a real, funded mainnet address (Binance hot wallet) as `taker`, so the
+;; aggregator returns a full transaction rather than an allowance error
+(def TAKER "0x28C6c06298d514Db089934071355E5743bf21d60")
+
+(defn part3-lifi []
+  (println "\n═══ 3. LI.FI live quote (USDC -> WETH, keyless) ═══")
+  (let [i (core/intent {:from usdc :to weth :amount "100" :taker TAKER
+                        :slippage-bps 100})
+        adapter (get agg/adapters :lifi)
+        req (agg/quote-request i adapter)]
+    (println "  GET" (:url req))
+    (p/let [{:keys [status body]} (GET (:url req))]
+      (check "LI.FI answered 200" (= 200 status) (str "status " status))
+      (if (not= 200 status)
+        (println "           body:" (pr-str (if (map? body) (select-keys body ["message"]) body)))
+        (let [parsed (try (agg/parse-quote i adapter body req)
+                          (catch :default e {:error (ex-message e)}))]
+          (check "the :lifi adapter field mapping matches the LIVE response"
+                 (not (:error parsed)) (:error parsed))
+          (when-not (:error parsed)
+            (check "expected-out extracted" (some? (:expected-out parsed))
+                   (str "expected " (:expected-out parsed)
+                        " min " (:min-out parsed)))
+            (check "min-out extracted (the anti-sandwich guard)"
+                   (some? (:min-out parsed)))
+            (check "a transaction step was built"
+                   (some #(= :evm-call (:step/kind %)) (:steps parsed))
+                   (str (count (:steps parsed)) " step(s): "
+                        (pr-str (mapv :step/kind (:steps parsed)))))
+            (let [{:keys [ok? problems]} (core/check i parsed nil)]
+              (check "swap.core/check passes the live LI.FI quote" ok?
+                     (pr-str problems)))))))))
+
+;; ══ 4. Ethereum mainnet: erc20 calldata + decoders against DEPLOYED USDC ══
+
+(def RPC "https://ethereum-rpc.publicnode.com")
+(def USDC "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+(defn eth-call [to data]
+  (p/let [{:keys [body]} (POST-json RPC {:jsonrpc "2.0" :id 1 :method "eth_call"
+                                        :params [{:to to :data data} "latest"]})]
+    (get body "result")))
+
+(defn part4-erc20 []
+  (println "\n═══ 4. erc20 against DEPLOYED USDC on Ethereum mainnet ═══")
+  (p/let [dec-ret (eth-call USDC (erc20/decimals))
+          sym-ret (eth-call USDC (erc20/symbol-of))
+          name-ret (eth-call USDC (erc20/name-of))
+          bal-ret (eth-call USDC (erc20/balance-of TAKER))
+          ds-ret (eth-call USDC (erc20/domain-separator-call))
+          nonce-ret (eth-call USDC (erc20/nonces TAKER))]
+    (check "decimals() -> 6" (= "6" (erc20/decode-uint dec-ret))
+           (str "decoded " (erc20/decode-uint dec-ret)))
+    (check "symbol() -> USDC" (= "USDC" (erc20/decode-string sym-ret))
+           (str "decoded " (pr-str (erc20/decode-string sym-ret))))
+    (check "name() -> USD Coin" (= "USD Coin" (erc20/decode-string name-ret))
+           (str "decoded " (pr-str (erc20/decode-string name-ret))))
+    (let [bal (erc20/decode-uint bal-ret)]
+      (check "balanceOf() decoded a plausible live balance"
+             (and (string? bal) (re-matches #"\d+" bal))
+             (str bal " units = " (erc20/->display bal 6) " USDC")))
+    (let [n (erc20/decode-uint nonce-ret)]
+      (check "nonces() decoded (EIP-2612 permit nonce)" (re-matches #"\d+" n)
+             (str "nonce " n)))
+    ;; THE strongest check available without spending anything: does our locally
+    ;; built EIP-712 domain hash to the SAME separator the deployed contract
+    ;; enforces? A mismatch means every permit signature we produce is silently
+    ;; rejected on-chain.
+    (let [onchain (str/lower-case (str ds-ret))
+          local (str "0x" (eth/bytes->hex
+                           (eth/domain-separator
+                            (permit/domain {:name "USD Coin" :version "2"
+                                            :chain-id 1 :token USDC}))))]
+      (check "LOCAL EIP-712 domain separator == USDC's on-chain DOMAIN_SEPARATOR()"
+             (= onchain (str/lower-case local))
+             (str "on-chain " onchain "\n           local    " local)))
+    ;; and the wrong version must NOT match, proving the check discriminates
+    (let [onchain (str/lower-case (str ds-ret))
+          wrong (str "0x" (eth/bytes->hex
+                           (eth/domain-separator
+                            (permit/domain {:name "USD Coin" :version "1"
+                                            :chain-id 1 :token USDC}))))]
+      (check "…and version \"1\" does NOT match (so the check is discriminating)"
+             (not= onchain (str/lower-case wrong))))))
+
+;; ══ 5. Sepolia: sign a REAL EIP-1559 tx and have a real node validate it ══
+;; No funds are involved. A node's "insufficient funds" reply is precisely the
+;; discriminator we want: to produce it, the node must have RLP-decoded the
+;; typed envelope, recovered the secp256k1 signature, DERIVED THE SENDER, and
+;; looked up that account's balance. A malformed envelope or a bad signature
+;; fails earlier and differently ("transaction type not supported", "invalid
+;; sender", "rlp: ..."), so this distinguishes "our signing is correct" from
+;; "our signing is garbage" without spending anything.
+
+(def SEPOLIA-RPC "https://ethereum-sepolia-rpc.publicnode.com")
+
+;; deterministic throwaway key — public in this script on purpose, holds nothing
+(def throwaway
+  (eth/hex->bytes "0x00000000000000000000000000000000000000000000000000000000deadbeef"))
+
+(defn part5-sepolia []
+  (println "\n═══ 5. Sepolia: a real node validates our EIP-1559 signature ═══")
+  (let [addr (eth/address-of-privkey throwaway)]
+    (println "  throwaway signer:" addr)
+    (p/let [{cid-body :body} (POST-json SEPOLIA-RPC {:jsonrpc "2.0" :id 1
+                                                    :method "eth_chainId" :params []})
+            chain-id (js/parseInt (str/replace (get cid-body "result" "0x0") "0x" "") 16)
+            {n-body :body} (POST-json SEPOLIA-RPC {:jsonrpc "2.0" :id 2
+                                                   :method "eth_getTransactionCount"
+                                                   :params [addr "latest"]})
+            {b-body :body} (POST-json SEPOLIA-RPC {:jsonrpc "2.0" :id 3
+                                                   :method "eth_getBalance"
+                                                   :params [addr "latest"]})
+            nonce (js/parseInt (str/replace (get n-body "result" "0x0") "0x" "") 16)
+            balance (get b-body "result")]
+      (check "Sepolia RPC reachable and reports chain id 11155111"
+             (= 11155111 chain-id) (str "chainId " chain-id))
+      (println (str "           nonce " nonce "  balance " balance))
+      (let [tx {:chain-id chain-id :nonce nonce
+                :max-priority-fee-per-gas 1000000000
+                :max-fee-per-gas 30000000000
+                :gas 21000
+                :to "0x0000000000000000000000000000000000000001"
+                :value 1
+                :data "0x"}
+            raw (eth/sign-tx-eip1559 tx throwaway)
+            txh (eth/raw-tx-hash raw)]
+        (println "           signed tx hash (pre-broadcast):" txh)
+        (p/let [{:keys [body]} (POST-json SEPOLIA-RPC
+                                          {:jsonrpc "2.0" :id 4
+                                           :method "eth_sendRawTransaction"
+                                           :params [raw]})
+                err (get-in body ["error" "message"])
+                result (get body "result")]
+          (println "           node reply:" (or result err (pr-str body)))
+          (cond
+            result
+            (check "node ACCEPTED the transaction (it was funded after all)" true
+                   (str "tx " result))
+
+            (and err (re-find #"(?i)insufficient funds" err))
+            (check (str "node DECODED the envelope, RECOVERED our signature and "
+                        "DERIVED the sender (rejected only for empty balance)")
+                   true err)
+
+            (and err (re-find #"(?i)known transaction|already known" err))
+            (check "node already had this exact signed tx (also proves validity)" true err)
+
+            :else
+            (check "node validated our signature" false
+                   (str "unexpected error — this is the failure mode that would "
+                        "indicate a malformed envelope or bad signature: " err))))))))
+
+;; ══ run ══
+
+(defn guarded
+  "Run a part, reporting a network failure as a SKIP rather than aborting the
+  run — an unreachable third party is not a defect in this code, and must not be
+  allowed to masquerade as one either way."
+  [label f]
+  (-> (p/do (f))
+      (p/catch (fn [e]
+                 (println (str "\n  SKIP  " label " — could not reach the endpoint: "
+                               (ex-message e)))))))
+
+(p/do
+  (println "LIVE VERIFICATION — swap plane vs real networks")
+  ;; THORChain's public endpoints (thornode.ninerealms.com, thornode.thorswap.net)
+  ;; are behind Cloudflare bot protection and answer a "Just a moment..."
+  ;; interstitial to a plain HTTP client; ninerealms no longer resolves at all.
+  ;; Working around bot protection is off the table, so the THORChain rail is NOT
+  ;; live-verified here — see the report. Parts 1-2 are left in the file so they
+  ;; run unchanged against an own node.
+  (guarded "3. LI.FI" part3-lifi)
+  (guarded "4. erc20 vs deployed USDC" part4-erc20)
+  (guarded "5. Sepolia signature validation" part5-sepolia)
+  (println (str "\n═══ TOTAL: " @ok " passed, " @fail " failed ═══"))
+  (when (pos? @fail) (js/process.exit 1)))
