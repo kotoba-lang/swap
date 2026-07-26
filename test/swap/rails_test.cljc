@@ -6,6 +6,7 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [swap.aggregator :as agg]
+            [swap.chains :as chains]
             [swap.core :as core]
             [swap.fee :as fee]
             [swap.thorchain :as tc]))
@@ -363,3 +364,34 @@
           {:keys [url provider]} (agg/quote-request i (agg/adapter))]
       (is (= :lifi provider))
       (is (str/includes? url "li.quest")))))
+
+
+;; ══ cross-chain is a per-ADAPTER capability, not a rail-wide ban ══
+
+(deftest lifi-accepts-cross-chain
+  (testing "LI.FI is a BRIDGE aggregator over 72 chains — the old blanket refusal
+            restricted the rail to a fraction of the vendor we actually use"
+    (let [i (core/intent {:from (chains/token :ethereum :usdc)
+                          :to (chains/token :base :usdc)
+                          :amount "100" :taker "0xt"})
+          {:keys [url]} (agg/quote-request i (agg/adapter :lifi))]
+      (is (true? (core/cross-chain? i)))
+      (is (str/includes? url "fromChain=1"))
+      (is (str/includes? url "toChain=8453")))))
+
+(deftest zero-ex-still-refuses-cross-chain
+  (testing "0x's Swap API really does settle on one chain, so the refusal belongs
+            to the adapter that needs it"
+    (is (false? (:cross-chain? (agg/adapter :zero-ex-v2 {:allow-unverified? true}))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (agg/quote-request (core/intent {:from (chains/token :ethereum :usdc)
+                                                  :to (chains/token :base :usdc)
+                                                  :amount "100" :taker "0xt"})
+                                    (agg/adapter :zero-ex-v2 {:allow-unverified? true}))))))
+
+(deftest same-chain-still-works-on-both
+  (doseq [id [:lifi :zero-ex-v2]]
+    (let [i (core/intent {:from (chains/token :ethereum :usdc) :to (chains/native :ethereum)
+                          :amount "100" :taker "0xt"})]
+      (is (map? (agg/quote-request i (agg/adapter id {:allow-unverified? true})))
+          (name id)))))

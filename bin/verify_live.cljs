@@ -29,6 +29,7 @@
             [eth-crypto.core :as eth]
             [promesa.core :as p]
             [swap.aggregator :as agg]
+            [swap.chains :as chains]
             [swap.core :as core]
             [swap.thorchain :as tc]
             [thorchain.quote :as tcq]))
@@ -323,6 +324,36 @@
                  (println (str "\n  SKIP  " label " — could not reach the endpoint: "
                                (ex-message e)))))))
 
+;; ══ 3b. LI.FI CROSS-CHAIN — the capability the old blanket refusal hid ══
+
+(defn part3b-lifi-crosschain []
+  (println "\n═══ 3b. LI.FI CROSS-CHAIN quote (Ethereum USDC -> Base USDC) ═══")
+  (let [i (core/intent {:from (chains/token :ethereum :usdc)
+                        :to (chains/token :base :usdc)
+                        :amount "100" :taker TAKER :slippage-bps 100})
+        adapter (agg/adapter :lifi)
+        req (agg/quote-request i adapter)]
+    (check "swap.core sees this as cross-chain" (core/cross-chain? i))
+    (println "  GET" (:url req))
+    (p/let [{:keys [status body]} (GET (:url req))]
+      (check "LI.FI answered 200 for a CROSS-CHAIN route" (= 200 status)
+             (str "status " status
+                  (when (not= 200 status) (str " " (pr-str (get body "message"))))))
+      (when (= 200 status)
+        (let [parsed (try (agg/parse-quote i adapter body req)
+                          (catch :default e {:error (ex-message e)}))]
+          (check "the adapter parsed a cross-chain quote" (not (:error parsed))
+                 (:error parsed))
+          (when-not (:error parsed)
+            (check "expected-out and min-out extracted across chains"
+                   (and (:expected-out parsed) (:min-out parsed))
+                   (str "expected " (:expected-out parsed) " min " (:min-out parsed)
+                        " (Base USDC, 6dp) = "
+                        (erc20/->display (:min-out parsed) 6)))
+            (let [{:keys [ok? problems]} (core/check i parsed nil)]
+              (check "swap.core/check passes the live cross-chain quote" ok?
+                     (pr-str problems)))))))))
+
 (p/do
   (println "LIVE VERIFICATION — swap plane vs real networks")
   ;; thornode.ninerealms.com no longer resolves and thornode.thorswap.net answers
@@ -333,6 +364,7 @@
   (guarded "2. THORChain inbound_addresses" part2-inbound)
   (guarded "2b. THORName registration" part2b-thorname)
   (guarded "3. LI.FI" part3-lifi)
+  (guarded "3b. LI.FI cross-chain" part3b-lifi-crosschain)
   (guarded "4. erc20 vs deployed USDC" part4-erc20)
   (guarded "5. Sepolia signature validation" part5-sepolia)
   (println (str "\n═══ TOTAL: " @ok " passed, " @fail " failed ═══"))

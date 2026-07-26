@@ -5,10 +5,11 @@
 ;;        | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljs
 (ns run-tests
   (:require [cljs.test :as t]
+            [swap.chains-test]
             [swap.core-test]
             [swap.rails-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (when-not (t/successful? m) (js/process.exit 1)))
 
-(t/run-tests 'swap.core-test 'swap.rails-test)
+(t/run-tests 'swap.chains-test 'swap.core-test 'swap.rails-test)
