@@ -8,7 +8,7 @@
  :deps {io.github.kotoba-lang/erc20
         {:git/sha "7229206b9118ee55b4582d2d102912a5140a6265"}
         io.github.kotoba-lang/org-thorchain
-        {:git/sha "675611a9d2036936ef7df2c6e172e24093f85f03"}
+        {:git/sha "dda03d694f2c52ea06b7c657586b5c70ba12c8f6"}
         io.github.kotoba-lang/treasury
         {:git/sha "9aafa2f188de8c84046f8b5d8bdc166002159277"}}
  :aliases
