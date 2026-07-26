@@ -101,13 +101,41 @@ parameter above.
 parameters carry the fee and where the transaction / expected-out / min-out live
 in the response. A vendor rename is a one-line edit.
 
-> **Honest status:** the shipped `:zero-ex-v2` and `:lifi` adapters' field names
-> come from published docs and have **not** been smoke-tested against a live API
-> key in this repo. Both carry `:verified? false`, and the normalized quote
-> surfaces `:verified-adapter?` so a caller can't miss it. `parse-quote` **fails
-> loudly** naming the exact path when a field is missing, rather than returning a
-> quote with a nil min-out. Flip `:verified?` once a real key has produced a real
-> quote.
+`:fee-unit` and `:slippage-unit` are part of that data and are **not** cosmetic:
+0x wants basis points, LI.FI wants a decimal fraction. The same 30 bps is `30` for
+one and `0.003` for the other. `:fee-recipient-kind` likewise records that 0x's
+recipient is an on-chain **address** while LI.FI's is a registered **integrator
+ID** whose payout wallet is configured out-of-band.
+
+### Adapter status, and what a live call bought
+
+| adapter | status |
+|---|---|
+| `:lifi` | **live-verified** 2026-07-26 against `li.quest`, keyless |
+| `:zero-ex-v2` | **docs-verified only.** Parameter names, `swapFeeBps`'s bps unit (0–1000), `issues.allowance` semantics and the `0x-version: v2` header are confirmed against 0x's current docs, but 0x needs an API key and this repo has none — so no live call has exercised the **response** field paths. `:verified? false` until one does. |
+
+The first live LI.FI call **failed**, and found four real defects that fixtures
+could not — because a fixture encodes what the author *believed* the vendor wanted:
+
+1. `toChain` is a **required** parameter and the adapter never sent it → `400`.
+2. `fee` is a decimal **fraction** (`0.02` = 2%), not basis points → `400`.
+3. `slippage` is a fraction too → `400`.
+4. `at` with a `nil` field path returned the **whole response body**, so an adapter
+   declaring no allowance paths (LI.FI) got the entire response as its `spender`,
+   made `needs-approve?` true, and threw encoding a map as an address.
+
+That is why `:verified?` is a field rather than a comment, and why the normalized
+quote surfaces `:verified-adapter?` so a caller cannot miss it. `parse-quote` also
+**fails loudly** naming the exact missing path rather than returning a quote with a
+nil min-out.
+
+Re-run it after touching an adapter (**not** in CI — CI must not go red because a
+third party is down):
+
+```bash
+nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+     | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljs
+```
 
 The plan includes an `:erc20-approve` step **only when the response says the
 allowance is actually short** (an unconditional approve costs the user a
@@ -181,6 +209,29 @@ Both rails are driven with response **fixtures**, not live vendors. The tests ar
 mostly adversarial: substituted destination, dropped fee, inflated fee, a vendor
 field rename, an off-by-one allowance, a min-out that ignores the caller's
 slippage, an expired quote, a late confirmation after failure.
+
+`bin/verify_live.cljs` then checks the parts fixtures cannot (15/15 as of
+2026-07-26, keyless):
+
+- a **live LI.FI quote** end to end — adapter mapping, expected-out, min-out, a
+  built transaction step, and `swap.core/check` passing;
+- `erc20` against **deployed USDC on Ethereum mainnet** — `decimals`/`symbol`/
+  `name`/`balanceOf`/`nonces` calldata and decoders, and the one that matters most:
+  a **locally built EIP-712 domain separator equal to USDC's on-chain
+  `DOMAIN_SEPARATOR()`**, with the wrong `version` correctly *not* matching. A
+  mismatch there means every permit signature is silently rejected on-chain;
+- an **EIP-1559 transaction validated by a real Sepolia node** — signed from an
+  empty throwaway key, so the node's `insufficient funds` reply is the precise
+  discriminator: to produce it, it had to RLP-decode the typed envelope, recover
+  the secp256k1 signature, and derive the sender. A malformed envelope or bad
+  signature fails earlier and differently.
+
+**The THORChain rail is not live-verified.** Its public endpoints sit behind
+Cloudflare bot protection (`thornode.thorswap.net` answers a `Just a moment…`
+interstitial; `thornode.ninerealms.com` no longer resolves at all), and working
+around bot protection is not something this repo will do. Parts 1–2 of the script
+are written and left in place so they run unchanged against your own node — which
+is what `org-thorchain` tells you to point at anyway.
 
 ## Dependencies
 

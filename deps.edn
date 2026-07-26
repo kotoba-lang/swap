@@ -13,8 +13,13 @@
         {:git/sha "9aafa2f188de8c84046f8b5d8bdc166002159277"}}
  :aliases
  {:test {:extra-paths ["test"]
+         ;; eth-crypto is a TEST/DEV-only dependency: swap never signs anything,
+         ;; but bin/verify_live.cljs uses it to check a locally built EIP-712
+         ;; domain separator against a deployed token's on-chain DOMAIN_SEPARATOR().
          :extra-deps {io.github.cognitect-labs/test-runner
-                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                      io.github.kotoba-lang/eth-crypto
+                      {:git/sha "1dca359cdff08a729f20b935f04390c8c04d262b"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}

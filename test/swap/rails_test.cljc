@@ -251,3 +251,76 @@
     (is (= :crypto-confirmed (:treasury/proof c)))
     (is (< (abs (- 0.3 (:treasury/fee c))) 1e-9))
     (is (< (abs (- 99.7 (:treasury/net c))) 1e-9))))
+
+;; ══ the two defects a LIVE call found that fixtures could not (2026-07-26) ══
+
+(deftest lifi-request-includes-required-to-chain
+  (testing "LI.FI 400s outright without toChain — fixtures never noticed"
+    (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"})
+          {:keys [url]} (agg/quote-request i (get agg/adapters :lifi))]
+      (is (str/includes? url "toChain=1"))
+      (is (str/includes? url "fromChain=1")))))
+
+(deftest units-are-per-vendor
+  (testing "the SAME 30 bps is 30 for 0x and 0.003 for LI.FI"
+    (is (= "30" (agg/bps->param :bps 30)))
+    (is (= "0.003" (agg/bps->param :fraction 30)))
+    (is (= "0.1" (agg/bps->param :fraction 1000)) "1000 bps = 10%")
+    (is (= "0.0005" (agg/bps->param :fraction 5)))
+    (is (= "0" (agg/bps->param :fraction 0)))
+    (testing "no exponent notation, ever — a vendor may not parse 3.0E-4"
+      (doseq [bps [1 5 30 250 1000]]
+        (is (not (str/includes? (agg/bps->param :fraction bps) "E"))
+            (str bps))
+        (is (not (str/includes? (agg/bps->param :fraction bps) "e"))
+            (str bps))))))
+
+(deftest lifi-sends-fee-as-fraction-not-bps
+  (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"
+                        :fee-bps 30 :fee-recipient "kotoba"})
+        {:keys [url]} (agg/quote-request i (get agg/adapters :lifi))]
+    (is (str/includes? url "fee=0.003")
+        "sending fee=30 would be out of LI.FI's 0<=x<1 range")
+    (is (str/includes? url "slippage=0.01")
+        "slippage is a fraction for LI.FI too — 100 bps is 0.01, not 100")
+    (is (str/includes? url "integrator=kotoba")
+        "LI.FI's recipient parameter is an integrator ID, not an address")))
+
+(deftest zero-ex-still-sends-bps
+  (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"
+                        :fee-bps 30 :fee-recipient "0xfee"})
+        {:keys [url]} (agg/quote-request i (get agg/adapters :zero-ex-v2))]
+    (is (str/includes? url "swapFeeBps=30"))
+    (is (str/includes? url "slippageBps=100") "0x wants bps for slippage")))
+
+(deftest adapter-verification-status-is-honest
+  (testing ":lifi is live-verified; :zero-ex-v2 is docs-only (no API key here)"
+    (is (true? (:verified? (get agg/adapters :lifi))))
+    (is (false? (:verified? (get agg/adapters :zero-ex-v2))))
+    (testing "…and the flag reaches the normalized quote, so a caller cannot miss it"
+      (let [i (core/intent {:from usdc :to weth :amount "1.5" :taker "0xtaker"})
+            req (agg/quote-request i (get agg/adapters :lifi))
+            q (agg/parse-quote i (get agg/adapters :lifi)
+                               {"transactionRequest" {"to" "0xdef1c0ded9bec7f1a1670819833240f027b25eff"
+                                                      "data" "0xabcd" "value" "0"}
+                                "estimate" {"toAmount" "600000000000000000"
+                                            "toAmountMin" "597000000000000000"}}
+                               req)]
+        (is (true? (:verified-adapter? q)))))))
+
+(deftest adapter-without-allowance-paths-builds-no-approve-step
+  (testing "a nil field path must yield nil, not the whole response body"
+    ;; :lifi declares no allowance paths. If `at` returned the body for a nil
+    ;; path, `spender` would be a truthy MAP, needs-approve? would be true, and
+    ;; the plan builder would throw trying to encode a map as an address.
+    (let [i (core/intent {:from usdc :to weth :amount "1.5" :taker "0xtaker"})
+          adapter (get agg/adapters :lifi)
+          req (agg/quote-request i adapter)
+          q (agg/parse-quote i adapter
+                             {"transactionRequest" {"to" "0xdef1c0ded9bec7f1a1670819833240f027b25eff"
+                                                    "data" "0xabcd" "value" "0"}
+                              "estimate" {"toAmount" "600000000000000000"
+                                          "toAmountMin" "597000000000000000"}}
+                             req)]
+      (is (= 1 (count (:steps q))))
+      (is (= :evm-call (:step/kind (first (:steps q))))))))

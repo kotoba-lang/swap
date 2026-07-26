@@ -13,29 +13,59 @@
   output live. Correcting a vendor change is a one-line data edit, and the plan
   builder below is tested against fixtures rather than against a live vendor.
 
-  HONEST STATUS OF THE SHIPPED ADAPTERS: the field names in `adapters` come from
-  each vendor's published documentation and have NOT been smoke-tested against a
-  live API key in this repo — no key, no live call, no claim that they are right.
-  Each adapter carries `:verified? false` for exactly that reason, and
+  STATUS OF THE SHIPPED ADAPTERS — the difference a live call makes:
+
+    :lifi        LIVE-VERIFIED 2026-07-26 against li.quest (keyless). The first
+                 live call FAILED, and found two real defects the fixtures could
+                 not: `toChain` is a REQUIRED parameter and was missing, and `fee`
+                 is a decimal FRACTION (0.02 = 2%), not basis points — sending
+                 bps there would have been rejected as out of range, or silently
+                 meant something else entirely. Both fixed; see `:fee-unit`.
+    :zero-ex-v2  DOCS-VERIFIED, NOT live-verified. Parameter names, the bps unit
+                 of `swapFeeBps` (0–1000), the `issues.allowance` semantics and
+                 the `0x-version: v2` header are confirmed against 0x's current
+                 published documentation, but 0x requires an API key and this repo
+                 has none, so no live call has exercised the RESPONSE field paths.
+                 Stays `:verified? false` until a real key produces a real quote.
+
+  The LI.FI result is the argument for why `:verified?` is a field and not a
+  comment: two of its parameters were wrong in a way no amount of fixture testing
+  would have caught, because fixtures encode what the author believed the vendor
+  wanted.
+
   `parse-quote` fails loudly with the adapter's own path when a field is missing,
   rather than returning a quote with a nil min-out (which `swap.core/check` would
-  then reject as unsafe anyway). Flip `:verified?` when a real key has produced a
-  real quote."
+  then reject as unsafe anyway)."
   (:require [clojure.string :as str]
             [erc20.core :as erc20]
             [swap.core :as core]
             [swap.fee :as fee]))
 
 (def adapters
-  "Declarative vendor adapters. `:fee-params` maps our fee concepts onto the
-  vendor's query parameters; `:paths` maps normalized quote fields onto paths
-  into the vendor's response body (string keys, as JSON decodes)."
+  "Declarative vendor adapters. `:params` / `:fee-params` map our concepts onto
+  the vendor's query parameters; `:paths` maps normalized quote fields onto paths
+  into the vendor's response body (string keys, as JSON decodes).
+
+  `:fee-unit` and `:slippage-unit` are load-bearing and NOT cosmetic: 0x wants
+  basis points while LI.FI wants a decimal fraction, so the same 30 bps is `30`
+  for one vendor and `0.003` for the other, and 100 bps of slippage is `100` vs
+  `0.01`. Getting it wrong is either a rejected request or — worse — a value three
+  orders of magnitude off. Both of LI.FI's units were wrong here until a live call
+  said so, one after the other.
+
+  `:fee-recipient-kind` says what the recipient parameter actually IS: an on-chain
+  ADDRESS for 0x, but a registered INTEGRATOR ID for LI.FI, whose payout wallet is
+  configured out-of-band in their partner portal rather than passed per request.
+  Passing an address where an integrator id belongs looks like it works."
   {:zero-ex-v2
    {:id :zero-ex-v2
-    :verified? false
+    :verified? false                      ; docs-verified only — see ns docstring
     :base-url "https://api.0x.org"
     :path "/swap/allowance-holder/quote"
-    :headers {"0x-version" "v2"}          ; API key added by the caller
+    :headers {"0x-version" "v2"}          ; API key (0x-api-key) added by the caller
+    :fee-unit :bps                        ; swapFeeBps: 0–1000, 1000 = 10%
+    :slippage-unit :bps                   ; slippageBps
+    :fee-recipient-kind :address
     :params {:chain-id "chainId"
              :sell-token "sellToken"
              :buy-token "buyToken"
@@ -44,7 +74,7 @@
              :slippage-bps "slippageBps"}
     :fee-params {:recipient "swapFeeRecipient"
                  :bps "swapFeeBps"
-                 :token "swapFeeToken"}
+                 :token "swapFeeToken"}   ; must be the buy or the sell token
     :paths {:tx-to ["transaction" "to"]
             :tx-data ["transaction" "data"]
             :tx-value ["transaction" "value"]
@@ -56,11 +86,15 @@
 
    :lifi
    {:id :lifi
-    :verified? false
+    :verified? true                       ; live-verified 2026-07-26, keyless
     :base-url "https://li.quest"
     :path "/v1/quote"
     :headers {}
+    :fee-unit :fraction                   ; fee: 0 <= x < 1, 0.02 = 2%
+    :slippage-unit :fraction              ; slippage: must be <= 1, 0.01 = 1%
+    :fee-recipient-kind :integrator-id
     :params {:chain-id "fromChain"
+             :to-chain-id "toChain"       ; REQUIRED — the live call 400s without it
              :sell-token "fromToken"
              :buy-token "toToken"
              :sell-amount "fromAmount"
@@ -73,6 +107,26 @@
             :tx-gas ["transactionRequest" "gasLimit"]
             :expected-out ["estimate" "toAmount"]
             :min-out ["estimate" "toAmountMin"]}}})
+
+(defn bps->param
+  "Render basis points in a vendor's unit: `:bps` -> `30`, `:fraction` -> `0.003`.
+  Used for BOTH the fee and the slippage parameter, because a vendor that wants
+  fractions wants them everywhere.
+
+  Done with string arithmetic rather than `(/ bps 10000.0)` for the same reason
+  every other amount in this plane avoids floats — and because a double formatted
+  by the platform's default printer can come out as `3.0E-4`, and finding out in
+  production that a vendor does not parse exponent notation is not a good way to
+  learn it. bps is an integer 0..1000, so the fraction is exactly four decimal
+  places and needs no arithmetic at all."
+  [fee-unit bps]
+  (case (or fee-unit :bps)
+    :bps (str bps)
+    :fraction (if (zero? bps)
+                "0"
+                (let [padded (str (apply str (repeat (- 4 (count (str bps))) "0")) bps)
+                      trimmed (str/replace padded #"0+$" "")]
+                  (str "0." trimmed)))))
 
 (defn- fee-token
   "Which token the fee is skimmed in. Taking it in the BUY token is the norm (the
@@ -89,7 +143,7 @@
   smallest unit with `erc20/->units`, which is exact string arithmetic: `0.1` at
   18 decimals is `100000000000000000`, not `99999999999999999`."
   [{:keys [from to amount taker slippage-bps fee-bps fee-recipient] :as intent}
-   {:keys [id params fee-params base-url path headers]}]
+   {:keys [id params fee-params base-url path headers fee-unit slippage-unit]}]
   (when (core/cross-chain? intent)
     (throw (ex-info (str "swap: the aggregator rail is same-chain only — "
                          (:chain from) " -> " (:chain to)
@@ -100,11 +154,15 @@
                    (params :sell-token) (or (:address from) (:asset from))
                    (params :buy-token) (or (:address to) (:asset to))
                    (params :sell-amount) sell-units
-                   (params :slippage-bps) (str slippage-bps)}
+                   (params :slippage-bps) (bps->param slippage-unit slippage-bps)}
+            ;; a same-chain swap still has to state the destination chain when the
+            ;; vendor asks for it — LI.FI 400s outright without toChain
+            (params :to-chain-id) (assoc (params :to-chain-id) (str (:chain-id to)))
             taker (assoc (params :taker) taker)
             (and fee-bps (pos? fee-bps))
             (cond-> (:recipient fee-params) (assoc (:recipient fee-params) fee-recipient)
-                    (:bps fee-params) (assoc (:bps fee-params) (str fee-bps))
+                    (:bps fee-params) (assoc (:bps fee-params)
+                                             (bps->param fee-unit fee-bps))
                     (:token fee-params) (assoc (:token fee-params) (fee-token intent))))]
     {:method :get
      :provider id
@@ -115,8 +173,17 @@
      :headers headers
      :sell-units sell-units}))
 
-(defn- at [body path]
-  (reduce (fn [m k] (when (map? m) (or (get m k) (get m (keyword k))))) body path))
+(defn- at
+  "Follow a field path into a decoded response body, tolerating string or keyword
+  keys. `nil`/empty path -> nil, NOT the whole body: an adapter that declares no
+  allowance paths at all (LI.FI does not) would otherwise get the entire response
+  map back as its `spender`, which is truthy — so `needs-approve?` became true and
+  the plan builder threw on a map where it wanted an address. `reduce` over an
+  empty path returning its init is exactly right in general and exactly wrong
+  here."
+  [body path]
+  (when (seq path)
+    (reduce (fn [m k] (when (map? m) (or (get m k) (get m (keyword k))))) body path)))
 
 (defn- require-at [body path field id]
   (or (at body path)
