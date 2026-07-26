@@ -36,7 +36,7 @@
   and ClojureScript loses precision above 2^53, so no float is allowed anywhere
   near an amount in this library."
   [{:keys [from to amount destination taker slippage-bps fee-bps fee-recipient
-           deadline-seconds]
+           fee-recipient-contract? deadline-seconds]
     :as raw}]
   (when-not (and (map? from) (map? to))
     (throw (ex-info "swap: :from and :to must be maps of {:chain :asset :decimals}"
@@ -63,6 +63,11 @@
    :slippage-bps (or slippage-bps 100)
    :fee-bps (or fee-bps 0)
    :fee-recipient fee-recipient
+   ;; Declared, not guessed: an EOA recipient legitimately has no code, so
+   ;; "no code at this address" is ambiguous between safe and funds-lost unless the
+   ;; caller says which kind of recipient it is. Set this true for a Safe or any
+   ;; other contract, and `check` will refuse a chain where it is not deployed.
+   :fee-recipient-contract? (boolean fee-recipient-contract?)
    :deadline-seconds (or deadline-seconds 1200)})
 
 (defn cross-chain?
@@ -93,6 +98,13 @@
 ;; bignum on both platforms (a uint256 does not fit in a double). Both platforms
 ;; have one — unlike modInverse/modPow — so these three helpers are all the
 ;; reader-conditional this namespace needs.
+
+(defn contract-code?
+  "Does an `eth_getCode` result indicate deployed code? An empty result means the
+  address is an EOA — or nothing at all — ON THAT CHAIN."
+  [code-result]
+  (boolean (and code-result (string? code-result)
+                (pos? (count (str/replace code-result #"^0x" ""))))))
 
 (defn amount<
   "Compare two non-negative smallest-unit decimal STRINGS, without a bignum:
@@ -145,8 +157,20 @@
   - **not expired.** Requires `now` to be passed in — this namespace never reads
     a clock, so the same quote+time pair always yields the same verdict
     (`Date.now()` is also unavailable to workflow-style callers here).
-  - **steps present.** A plan with no steps would \"succeed\" doing nothing."
-  [intent {:keys [expected-out min-out fee-bps fee-mechanism expires-at steps]} now]
+  - **steps present.** A plan with no steps would \"succeed\" doing nothing.
+  - **the fee recipient exists on the chain it will be paid on.** Checked when the
+    intent declares `:fee-recipient-contract? true`. A Safe is deployed PER CHAIN,
+    and a fee paid to an address with no code there cannot be moved by anyone —
+    measured on a real Safe that existed on Ethereum and had no code on six other
+    chains. Declared-but-unchecked is itself a problem, so a caller cannot forget
+    to look.
+
+  `facts` is an optional map of things this namespace cannot look up, because it
+  performs no I/O: currently `{:fee-recipient-code <eth_getCode result>}`, obtained
+  via `swap.fee/recipient-code-request`."
+  ([intent quote now] (check intent quote now {}))
+  ([intent {:keys [expected-out min-out fee-bps fee-mechanism expires-at steps]} now
+    {:keys [fee-recipient-code] :as facts}]
   (let [exp (big expected-out)
         mn (big min-out)
         problems
@@ -177,8 +201,32 @@
                  :requested (:fee-bps intent) :encoded fee-bps})
 
           (and expires-at now (<= expires-at now))
-          (conj {:problem :quote-expired :expires-at expires-at :now now}))]
-    (if (seq problems) {:ok? false :problems problems} {:ok? true})))
+          (conj {:problem :quote-expired :expires-at expires-at :now now})
+
+          ;; A contract fee recipient must be deployed on the chain the fee lands
+          ;; on. Declared-but-unchecked is its OWN problem rather than a silent
+          ;; pass: the point is that a caller cannot forget to look.
+          (and (pos? (:fee-bps intent 0))
+               (:fee-recipient-contract? intent)
+               (not (contains? facts :fee-recipient-code)))
+          (conj {:problem :fee-recipient-unverified
+                 :recipient (:fee-recipient intent)
+                 :note (str "recipient is declared a contract but no eth_getCode result"
+                            " was supplied — run swap.fee/recipient-code-request and pass"
+                            " the result as :fee-recipient-code")})
+
+          (and (pos? (:fee-bps intent 0))
+               (:fee-recipient-contract? intent)
+               (contains? facts :fee-recipient-code)
+               (not (contract-code? fee-recipient-code)))
+          (conj {:problem :fee-recipient-has-no-code
+                 :recipient (:fee-recipient intent)
+                 :chain (or (get-in intent [:to :chain]) (get-in intent [:from :chain]))
+                 :note (str "no contract code at the fee recipient on this chain. A Safe"
+                            " is deployed PER CHAIN — a fee paid here cannot be moved by"
+                            " anyone. Deploy it on this chain first, or name a recipient"
+                            " that exists here.")}))]
+    (if (seq problems) {:ok? false :problems problems} {:ok? true}))))
 
 (defn plan
   "Validate and return the execution steps, or throw. Use when a caller wants a

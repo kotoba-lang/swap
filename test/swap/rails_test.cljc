@@ -395,3 +395,70 @@
                           :amount "100" :taker "0xt"})]
       (is (map? (agg/quote-request i (agg/adapter id {:allow-unverified? true})))
           (name id)))))
+
+;; ══ a contract fee recipient must exist on the chain the fee lands on ══
+;; Measured on a real Safe (2026-07-26): deployed on Ethereum mainnet as v1.4.1,
+;; and eth_getCode EMPTY on BSC, Avalanche, Base, Polygon, Arbitrum and Optimism.
+;; Paying a fee to it on any of those six is unrecoverable by anyone.
+
+(def safe-recipient "0x640404B566D34c401996eBb360F40BC4cECFA881")
+(def deployed-code "0x608060405273ffffffffffffffffffffffffffffffffffffffff")
+(def no-code "0x")
+
+(def fee-ok-quote
+  {:rail :aggregator :provider :test
+   :expected-out "600000000000000000"
+   :min-out "597000000000000000"
+   :fee-bps 30 :fee-mechanism :protocol-affiliate
+   :expires-at 2000
+   :steps [{:step/kind :evm-call :step/why "swap" :to "0xr" :data "0x" :value "0"}]})
+
+(def fee-intent
+  (core/intent {:from usdc :to weth :amount "100" :taker "0xt"
+                :fee-bps 30 :fee-recipient safe-recipient
+                :fee-recipient-contract? true}))
+
+(deftest contract-code?-reads-eth-getCode
+  (is (true? (core/contract-code? deployed-code)))
+  (is (false? (core/contract-code? no-code)))
+  (is (false? (core/contract-code? nil))))
+
+(deftest fee-recipient-with-no-code-is-refused
+  (testing "the failure this exists to prevent — a fee paid into a dead address"
+    (let [{:keys [ok? problems]}
+          (core/check fee-intent fee-ok-quote 1000 {:fee-recipient-code no-code})]
+      (is (false? ok?))
+      (is (some #(= :fee-recipient-has-no-code (:problem %)) problems)))))
+
+(deftest fee-recipient-with-code-passes
+  (is (:ok? (core/check fee-intent fee-ok-quote 1000 {:fee-recipient-code deployed-code}))))
+
+(deftest declared-but-unchecked-is-its-own-problem
+  (testing "a caller must not be able to forget to look"
+    (let [{:keys [ok? problems]} (core/check fee-intent fee-ok-quote 1000)]
+      (is (false? ok?))
+      (is (some #(= :fee-recipient-unverified (:problem %)) problems)))))
+
+(deftest an-eoa-recipient-needs-no-code-check
+  (testing "not declaring a contract keeps the old behaviour, so nothing breaks"
+    (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"
+                          :fee-bps 30 :fee-recipient "0xfee"})]
+      (is (false? (:fee-recipient-contract? i)))
+      (is (:ok? (core/check i fee-ok-quote 1000))))))
+
+(deftest a-zero-fee-swap-skips-the-recipient-check
+  (testing "no fee, nothing to lose, no check to run"
+    (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"
+                          :fee-recipient-contract? true})]
+      (is (:ok? (core/check i (assoc fee-ok-quote :fee-bps 0 :fee-mechanism :none) 1000))))))
+
+(deftest fee-recipient-code-request-and-verify
+  (let [req (fee/recipient-code-request fee-intent)]
+    (is (= "eth_getCode" (:method req)))
+    (is (= [safe-recipient "latest"] (:params req))))
+  (testing "verify-recipient reports the chain the fee would land on"
+    (let [{:keys [ok? problem chain]} (fee/verify-recipient fee-intent no-code)]
+      (is (false? ok?))
+      (is (= :recipient-has-no-code problem))
+      (is (= "ETH" chain))))
+  (is (:ok? (fee/verify-recipient fee-intent deployed-code))))
