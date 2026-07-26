@@ -334,3 +334,32 @@
                              req)]
       (is (= 1 (count (:steps q))))
       (is (= :evm-call (:step/kind (first (:steps q))))))))
+
+;; ══ LI.FI-only is enforced, not remembered (owner decision 2026-07-26) ══
+
+(deftest default-adapter-is-the-verified-one
+  (is (= :lifi agg/default-adapter))
+  (is (= (get agg/adapters :lifi) (agg/adapter)))
+  (is (true? (:verified? (agg/adapter))))
+  (testing "the default and the live-verified adapter are the same thing"
+    (is (= agg/default-adapter
+           (first (keep (fn [[k v]] (when (:verified? v) k)) agg/adapters))))))
+
+(deftest unverified-adapter-is-refused
+  (testing "an unverified mapping is the same risk as an untested one, wearing docs"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (agg/adapter :zero-ex-v2)))
+    (testing "…but reachable on purpose"
+      (is (= (get agg/adapters :zero-ex-v2)
+             (agg/adapter :zero-ex-v2 {:allow-unverified? true}))))))
+
+(deftest unknown-adapter-is-refused
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (agg/adapter :one-inch))))
+
+(deftest resolved-adapter-still-quotes
+  (testing "the default resolves into a working request without naming a vendor"
+    (let [i (core/intent {:from usdc :to weth :amount "100" :taker "0xt"})
+          {:keys [url provider]} (agg/quote-request i (agg/adapter))]
+      (is (= :lifi provider))
+      (is (str/includes? url "li.quest")))))

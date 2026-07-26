@@ -31,7 +31,11 @@
   The LI.FI result is the argument for why `:verified?` is a field and not a
   comment: two of its parameters were wrong in a way no amount of fixture testing
   would have caught, because fixtures encode what the author believed the vendor
-  wanted.
+  wanted. So the flag is ENFORCED — `adapter` refuses an unverified one unless the
+  caller opts in explicitly, rather than trusting that someone read this docstring.
+
+  Current position (owner decision 2026-07-26): **LI.FI only**. 0x is deferred, not
+  abandoned — the mapping stays, ready for one live call once a key exists.
 
   `parse-quote` fails loudly with the adapter's own path when a field is missing,
   rather than returning a quote with a nil min-out (which `swap.core/check` would
@@ -107,6 +111,45 @@
             :tx-gas ["transactionRequest" "gasLimit"]
             :expected-out ["estimate" "toAmount"]
             :min-out ["estimate" "toAmountMin"]}}})
+
+(def default-adapter
+  "The adapter to use unless a caller says otherwise: `:lifi`.
+
+  Owner decision 2026-07-26 — LI.FI only for now, 0x deferred (not abandoned).
+  LI.FI is also the only adapter that has been live-verified, so the default and
+  the verified one are deliberately the same thing."
+  :lifi)
+
+(defn adapter
+  "Resolve an adapter by id, defaulting to `default-adapter`, and REFUSE an
+  unverified one unless the caller opts in explicitly.
+
+  This is why `:verified?` is a field: after a live call found four defects in a
+  mapping that had been written carefully from the vendor's own documentation, an
+  unverified mapping is not a smaller risk than an untested one — it is the same
+  risk wearing documentation. So the flag is enforced here rather than left as a
+  note somebody is supposed to have read.
+
+  `(adapter)` -> the default. `(adapter :zero-ex-v2)` -> throws.
+  `(adapter :zero-ex-v2 {:allow-unverified? true})` -> allowed, on your head."
+  ([] (adapter default-adapter {}))
+  ([id] (adapter id {}))
+  ([id {:keys [allow-unverified?]}]
+   (let [a (get adapters id)]
+     (when-not a
+       (throw (ex-info (str "swap: no such aggregator adapter: " (pr-str id))
+                       {:known (sort (keys adapters))})))
+     (when (and (not (:verified? a)) (not allow-unverified?))
+       (throw (ex-info
+               (str "swap: adapter " id " has never been verified against the live API"
+                    " (:verified? false) — its request parameters are docs-checked but its"
+                    " RESPONSE field paths have never been exercised. A live call against"
+                    " :lifi found four defects in a mapping written just as carefully, so"
+                    " this is not a theoretical risk. Verify it with bin/verify_live.cljs"
+                    " and set :verified? true, or pass :allow-unverified? true deliberately.")
+               {:adapter id :verified? false
+                :verified-adapters (sort (keep (fn [[k v]] (when (:verified? v) k)) adapters))})))
+     a)))
 
 (defn bps->param
   "Render basis points in a vendor's unit: `:bps` -> `30`, `:fraction` -> `0.003`.
