@@ -17,7 +17,7 @@
     :thorchain  — native cross-chain, e.g. BTC <-> ETH (`swap.thorchain`)
   Both produce the same normalized quote and the same kind of plan, so a caller
   picks a rail by asset pair and doesn't branch on vendor shapes."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ─── intent ──────────────────────────────────────────────────────────────
 

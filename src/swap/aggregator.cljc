@@ -40,7 +40,7 @@
   `parse-quote` fails loudly with the adapter's own path when a field is missing,
   rather than returning a quote with a nil min-out (which `swap.core/check` would
   then reject as unsafe anyway)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [erc20.core :as erc20]
             [swap.core :as core]
             [swap.fee :as fee]))
