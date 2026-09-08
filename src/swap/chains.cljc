@@ -25,7 +25,7 @@
   SOL were all halted when this was written) and a stale flag is worse than none —
   read it at runtime from `thorchain.quote/parse-inbound-addresses` and
   `chain-sendable?`."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def chains
   "Keyed by our own chain keyword. `:chain` is the code THORChain uses and the one
@@ -153,7 +153,7 @@
       (:chain-id c) (assoc :chain-id (:chain-id c))
       ;; THORChain names a token as CHAIN.SYMBOL-CONTRACT
       (:thorchain-gas-asset c)
-      (assoc :asset (str (:chain c) "." (:symbol t) "-" (str/upper-case (:address t)))))))
+      (assoc :asset (str (:chain c) "." (:symbol t) "-" (str/upper (:address t)))))))
 
 (defn on-rail
   "Chain keys reachable by `rail` (`:aggregator` or `:thorchain`)."

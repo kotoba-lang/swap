@@ -3,7 +3,7 @@
   builder, the fee wiring, the approve-only-when-needed rule, and — for
   THORChain — the refusal to build a transfer from a memo that does not match
   what was requested."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [swap.aggregator :as agg]
             [swap.chains :as chains]
