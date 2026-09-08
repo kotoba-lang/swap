@@ -23,7 +23,7 @@
 ;; That is the argument for live-verifying a vendor mapping before trusting it
 ;; with money.
 (ns verify-live
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [erc20.core :as erc20]
             [erc20.permit :as permit]
             [eth-crypto.core :as eth]
@@ -228,22 +228,22 @@
     ;; built EIP-712 domain hash to the SAME separator the deployed contract
     ;; enforces? A mismatch means every permit signature we produce is silently
     ;; rejected on-chain.
-    (let [onchain (str/lower-case (str ds-ret))
+    (let [onchain (str/lower (str ds-ret))
           local (str "0x" (eth/bytes->hex
                            (eth/domain-separator
                             (permit/domain {:name "USD Coin" :version "2"
                                             :chain-id 1 :token USDC}))))]
       (check "LOCAL EIP-712 domain separator == USDC's on-chain DOMAIN_SEPARATOR()"
-             (= onchain (str/lower-case local))
+             (= onchain (str/lower local))
              (str "on-chain " onchain "\n           local    " local)))
     ;; and the wrong version must NOT match, proving the check discriminates
-    (let [onchain (str/lower-case (str ds-ret))
+    (let [onchain (str/lower (str ds-ret))
           wrong (str "0x" (eth/bytes->hex
                            (eth/domain-separator
                             (permit/domain {:name "USD Coin" :version "1"
                                             :chain-id 1 :token USDC}))))]
       (check "…and version \"1\" does NOT match (so the check is discriminating)"
-             (not= onchain (str/lower-case wrong))))))
+             (not= onchain (str/lower wrong))))))
 
 ;; ══ 5. Sepolia: sign a REAL EIP-1559 tx and have a real node validate it ══
 ;; No funds are involved. A node's "insufficient funds" reply is precisely the
