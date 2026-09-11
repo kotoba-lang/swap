@@ -78,4 +78,4 @@ jobs:
       - name: Run tests under ClojureScript
         run: |
           CP="$(clojure -Spath -M:test | tr ':' '\n' | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')"
-          nbb --classpath "$CP" bin/run_tests.cljs
+          nbb --classpath "$CP" bin/run_tests.cljk

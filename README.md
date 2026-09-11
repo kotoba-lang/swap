@@ -126,7 +126,7 @@ Three deliberate details:
 - **Not declaring anything keeps the previous behaviour**, so existing callers are
   unaffected.
 
-Verified live (`bin/verify_live.cljs` part 6) against that same Safe on both a chain
+Verified live (`bin/verify_live.cljk` part 6) against that same Safe on both a chain
 where it exists and one where it does not — including the positive case, because the
 first version of that check read `nil` on both chains and the negative assertion
 passed *by accident*.
@@ -225,7 +225,7 @@ third party is down):
 
 ```bash
 nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
-     | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljs
+     | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljk
 ```
 
 **Cross-chain is a per-adapter capability, not a rail-wide ban.** This used to be a
@@ -303,7 +303,7 @@ clojure -M:test    # JVM  — 47 tests, 128 assertions
 clojure -M:lint    # 0 errors, 0 warnings
 # cljs (same suite; nbb doesn't read deps.edn, so assemble the classpath):
 nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
-     | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljs
+     | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljk
 ```
 
 Both rails are driven with response **fixtures**, not live vendors. The tests are
@@ -311,7 +311,7 @@ mostly adversarial: substituted destination, dropped fee, inflated fee, a vendor
 field rename, an off-by-one allowance, a min-out that ignores the caller's
 slippage, an expired quote, a late confirmation after failure.
 
-`bin/verify_live.cljs` then checks the parts fixtures cannot (15/15 as of
+`bin/verify_live.cljk` then checks the parts fixtures cannot (15/15 as of
 2026-07-26, keyless):
 
 - a **live LI.FI quote** end to end — adapter mapping, expected-out, min-out, a

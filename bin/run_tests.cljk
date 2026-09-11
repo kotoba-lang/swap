@@ -2,7 +2,7 @@
 ;; wallet too, so the cljs suite is a CI gate. The classpath is assembled from
 ;; the git-dep source dirs because nbb does not read deps.edn:
 ;;   nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
-;;        | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljs
+;;        | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljk
 (ns run-tests
   (:require [cljs.test :as t]
             [swap.chains-test]

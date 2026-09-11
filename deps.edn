@@ -19,7 +19,7 @@
  :aliases
  {:test {:extra-paths ["test"]
          ;; eth-crypto is a TEST/DEV-only dependency: swap never signs anything,
-         ;; but bin/verify_live.cljs uses it to check a locally built EIP-712
+         ;; but bin/verify_live.cljk uses it to check a locally built EIP-712
          ;; domain separator against a deployed token's on-chain DOMAIN_SEPARATOR().
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}
