@@ -1,7 +1,7 @@
 ;; nbb test runner. swap's plan/check/state-machine layer must run in a browser
 ;; wallet too, so the cljs suite is a CI gate. The classpath is assembled from
 ;; the git-dep source dirs because nbb does not read deps.edn:
-;;   nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+;;   kbb --backend sci --classpath "$(kbb -Spath -M:test | tr ':' '\n' \
 ;;        | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljk
 (ns run-tests
   (:require [cljs.test :as t]
