@@ -7,7 +7,7 @@
 ;; adapter its `:verified? true`.
 ;;
 ;;   nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
-;;        | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljs
+;;        | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljk
 ;;
 ;; Everything here runs the ACTUAL library code — the point is not "can we curl an
 ;; API" but "does erc20/org-thorchain/swap agree with a real chain and a real node".

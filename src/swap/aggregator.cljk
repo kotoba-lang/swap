@@ -151,7 +151,7 @@
                     " (:verified? false) — its request parameters are docs-checked but its"
                     " RESPONSE field paths have never been exercised. A live call against"
                     " :lifi found four defects in a mapping written just as carefully, so"
-                    " this is not a theoretical risk. Verify it with bin/verify_live.cljs"
+                    " this is not a theoretical risk. Verify it with bin/verify_live.cljk"
                     " and set :verified? true, or pass :allow-unverified? true deliberately.")
                {:adapter id :verified? false
                 :verified-adapters (sort (keep (fn [[k v]] (when (:verified? v) k)) adapters))})))
