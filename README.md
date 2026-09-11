@@ -224,7 +224,7 @@ Re-run it after touching an adapter (**not** in CI — CI must not go red becaus
 third party is down):
 
 ```bash
-nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+kbb --backend sci --classpath "$(kbb -Spath -M:test | tr ':' '\n' \
      | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljk
 ```
 
@@ -299,10 +299,10 @@ trail.
 ## Verification
 
 ```bash
-clojure -M:test    # JVM  — 47 tests, 128 assertions
-clojure -M:lint    # 0 errors, 0 warnings
+kbb -M:test    # JVM  — 47 tests, 128 assertions
+kbb -M:lint    # 0 errors, 0 warnings
 # cljs (same suite; nbb doesn't read deps.edn, so assemble the classpath):
-nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+kbb --backend sci --classpath "$(kbb -Spath -M:test | tr ':' '\n' \
      | grep -E 'kotoba-lang|^src$|^test$' | tr '\n' ':')" bin/run_tests.cljk
 ```
 

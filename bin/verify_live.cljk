@@ -6,7 +6,7 @@
 ;; This is the check you run when you change an adapter, and the one that earns an
 ;; adapter its `:verified? true`.
 ;;
-;;   nbb --classpath "$(clojure -Spath -M:test | tr ':' '\n' \
+;;   kbb --backend sci --classpath "$(kbb -Spath -M:test | tr ':' '\n' \
 ;;        | grep -E 'kotoba-lang|^src$' | tr '\n' ':')" bin/verify_live.cljk
 ;;
 ;; Everything here runs the ACTUAL library code — the point is not "can we curl an
